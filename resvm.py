@@ -33,6 +33,10 @@
 from copy import deepcopy
 from random import shuffle
 import sys, traceback, subprocess, itertools
+import numpy as np
+import pandas as pd
+from eli5.permutation_importance import get_score_importances
+from sklearn.datasets import dump_svmlight_file
 
 ####################################################
 # DEFAULT CONFIGURATION & PARAMETER PARSING
@@ -65,12 +69,27 @@ class Config:
         self.dict[key]=value
     def __getitem__(self, key):
         val = self.dict.get(key)
-        if val==None:
+        if val is None:
             traceback.print_stack()
             sys.exit("\nError: parameter \"" + key + "\" is not configured.")
         return val            
     def update(self,newconfig):
         self.dict.update(newconfig)
+        if 'csv' in newconfig:
+            df = pd.read_csv(self.dict['csv'])
+            df = df.set_index('INN')
+            X = df.drop(columns=['flagged'])
+            y = df['flagged']
+            data = 'data.libsvm'
+            updated = {
+                'df': df,
+                'X': X.as_matrix(),
+                'y': y.as_matrix(),
+                'data': data
+            }
+            dump_svmlight_file(X, y, data)
+            self.update(updated)
+
     def get(self):
         return self.dict
         
@@ -225,7 +244,7 @@ noclean     : retain intermediate files (flag, default: remove intermediates).""
     sys.exit(0)
 
 # check if the task is properly set (e.g. "train", "predict" or "cross-validate")
-num_tasks = sum(["cross-validate" in cfg, "train" in cfg, "predict" in cfg, "grid-search" in cfg])
+num_tasks = sum(["cross-validate" in cfg, "train" in cfg, "predict" in cfg, "grid-search" in cfg, "eli" in cfg])
 if num_tasks > 1:
     sys.exit("Error: multiple tasks specified. Please choose one task: train, predict, cross-validate or grid-search.")
 elif num_tasks == 0:
@@ -591,3 +610,15 @@ elif "grid-search" in cfg:
     if "model" in cfg:
         resvm_train(cfg)
         
+elif "eli" in cfg:
+    binary_labels = read_binary_labels(cfg["data"], " ", cfg["pos"])   # all data
+    true_labels = [binary_labels[x] for x in range(len(binary_labels))]
+    def score(X, y): # or cfg['data'] cfg, binary_labels
+        dump_svmlight_file(X, y, cfg['data'])
+        labels, decision_values = resvm_predict(cfg)
+        true_labels = [binary_labels[x] for x in range(len(binary_labels))]
+        return scorefun(true_labels, [x > 0.5 for x in decision_values]) # [x > 0.5 for x in decision_values] <--- gets you all predict as 1
+    base_score, score_decreases = get_score_importances(score, cfg['X'], cfg['y']) # get_score_importances(score, cfg, [x > 0.5 for x in decision_values]) <---- adapt to the scorefun function already define in the resvm model
+    feature_importances = np.mean(score_decreases, axis=0)
+    importance_df = pd.DataFrame({'feature': cfg['df'].drop(columns="tagged").columns, 'importance': feature_importances})
+    importance_df.to_csv('feature_importances.csv')
